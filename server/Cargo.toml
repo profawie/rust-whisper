@@ -1,0 +1,9 @@
+[package]
+name = "whisper-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+whisper-core = { path = "../core" }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"

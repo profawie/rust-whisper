@@ -1,0 +1,8 @@
+/target
+/web/dist
+/work
+/models
+/.tools
+/settings.json
+.DS_Store
+/dist

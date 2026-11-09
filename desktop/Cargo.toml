@@ -1,0 +1,11 @@
+[package]
+name = "whisper-desktop"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+whisper-core = { path = "../core" }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+tao = "0.37"
+wry = "0.57"
