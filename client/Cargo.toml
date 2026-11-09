@@ -1,0 +1,16 @@
+[package]
+name = "whisper-client"
+version.workspace = true
+edition.workspace = true
+description = "Windows client for rust-whisper: pick videos, send them to the server, play them in VLC"
+
+[dependencies]
+common = { path = "../common" }
+serde.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "system_fonts", "wgpu", "clipboard"] }
+rfd = "0.18"
+ureq = { version = "2", features = ["json"] }
+dirs = "6"
+anyhow = "1"
+percent-encoding = "2"

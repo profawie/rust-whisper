@@ -8,6 +8,7 @@ Three apps share one engine (whisper.cpp with Metal GPU on Apple Silicon):
 | Server | `server/` | HTTP API + web UI on port 8888, reachable from other devices on the LAN |
 | Web | `web/` | The UI, written in Rust (Leptos) and compiled to WebAssembly; embedded in both binaries |
 | Desktop | `desktop/` | Native macOS window (tao/wry) running the engine in-process on a private localhost port |
+| Client | `client/` | Windows app (egui) that sends videos from a Windows PC to the server and plays them in VLC |
 
 `core/` holds the engine and API, `common/` the types shared with the WASM UI.
 
@@ -18,6 +19,8 @@ Three apps share one engine (whisper.cpp with Metal GPU on Apple Silicon):
 ./run.sh desktop    # desktop app
 ./run.sh app        # build dist/Whisper.app (drag it to /Applications)
 ./run.sh test       # unit tests
+./run.sh stop       # stop the running server / desktop app
+./run.sh client     # build dist/whisper-client.exe for Windows (cross-compiled with zig)
 ```
 
 First run installs what is missing (wasm32 target, trunk, a private CMake in `.tools/`) and builds everything.
@@ -34,3 +37,16 @@ Other settings: `PORT`, `HOST`, `THREADS`.
 * Long lines are split at sentence or comma boundaries into subtitle-sized lines.
 
 English audio keeps the simple path: one whisper.cpp pass with built-in VAD.
+
+## Windows client
+
+`./run.sh client` builds `dist/whisper-client.exe` (single file, no installer). Copy it to the Windows PC and run it.
+
+* **Header:** server IP and port, **Connect**. Once connected, the spoken-language and model lists appear (the model is remembered per language, shared with the web UI). The last server is reconnected automatically on the next start.
+* **Folder:** pick a folder with **Browse…**. Sub-folders are scanned too.
+* **Left panel:** videos that have no `.srt` yet, as a folder tree. Tick videos (or right-click a folder) and press **Generate subtitles**. Files are sent to the server one by one and the English `.srt` is saved next to each video, after which the video moves to the right panel.
+* **Right panel:** videos that already have a subtitle (`name.srt`, `name.en.srt`, …), with their `.srt` files under them.
+* **Double-click** a video to play it in VLC; on the right, the video plays with its subtitle loaded, and double-clicking a specific `.srt` plays the video with that one. Right-click for more (show in Explorer, regenerate).
+* VLC is found automatically (Program Files or the registry); **Set VLC…** picks `vlc.exe` by hand.
+
+The Mac running the server must accept connections on the port (allow it if macOS asks about incoming connections).

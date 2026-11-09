@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["common", "core", "server", "desktop", "web"]
+members = ["common", "core", "server", "desktop", "web", "client"]
 default-members = ["server", "desktop"]
 
 [workspace.package]
