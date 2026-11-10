@@ -37,6 +37,7 @@ Other settings: `PORT`, `HOST`, `THREADS`.
 * **No missing lines.** Silero VAD (tuned to keep speech under music) cuts the audio into pieces of at most ~15 s. A piece that comes back empty, much shorter than its speech, or still in Japanese/Chinese is translated again with an English prompt and with temperature sampling, and the best attempt wins. Whisper's own "no speech" skipping is relaxed because VAD already removed the silence.
 * **No duplicated lines.** Each piece is translated on its own, so a repetition loop cannot spread. Repeated phrases, repeated lines (also A-B-A-B loops) and YouTube-style hallucinations ("Thanks for watching", "Please subscribe", "Subtitles by…") are removed.
 * Long lines are split at sentence or comma boundaries into subtitle-sized lines.
+* **TV-style timing.** Every line is fitted to the voice that VAD heard: it appears when the speaker starts and disappears ~0.35 s after they stop, instead of hanging over the action that follows. A line that covers two separate stretches of speech is split at a sentence boundary, short lines stay at least ~0.85 s (long enough to read), nothing stays longer than 7 s, and lines never overlap. This applies to English audio too.
 
 English audio keeps the simple path: one whisper.cpp pass with built-in VAD.
 

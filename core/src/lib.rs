@@ -5,6 +5,7 @@ pub mod cleanup;
 pub mod engine;
 pub mod models;
 pub mod state;
+pub mod timing;
 
 pub use state::{App, Paths, Shared};
 

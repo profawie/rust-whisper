@@ -78,6 +78,19 @@ fn job(app: &App, path: &Path, filename: &str, model_key: &str, language: &str) 
     };
     app.info(format!("Speech processed in {:.0}s.", started.elapsed().as_secs_f64()));
 
+    // ---- timing: start/end each line on the voice, like TV subtitles
+    app.set_progress("Fitting subtitle timing", 95.0);
+    let segments = match fine_speech(&audio, &vad_path) {
+        Ok(speech) => {
+            app.info(format!("Fitting subtitle timing to {} voice regions...", speech.len()));
+            crate::timing::retime(segments, &speech)
+        }
+        Err(e) => {
+            app.warn(format!("Voice regions unavailable ({e}); using reading-time limits only."));
+            crate::timing::retime(segments, &[])
+        }
+    };
+
     // ---- SRT
     app.set_progress("Writing SRT", 96.0);
     let (srt, count) = to_srt(&segments);
@@ -404,6 +417,22 @@ fn speech_chunks(audio: &[f32], vad: &Path) -> Result<Vec<(f32, f32)>> {
     // whisper.cpp reports VAD timestamps in centiseconds
     let regions: Vec<(f32, f32)> = segs.map(|s| (s.start / 100.0, (s.end / 100.0).min(dur))).collect();
     Ok(merge_regions(&regions, MAX_CHUNK_S, 1.0))
+}
+
+/// Precise voice regions (seconds) used to time the subtitles.
+fn fine_speech(audio: &[f32], vad: &Path) -> Result<Vec<(f64, f64)>> {
+    let mut cp = WhisperVadContextParams::new();
+    cp.set_n_threads(4);
+    cp.set_use_gpu(false);
+    let mut vctx = WhisperVadContext::new(vad.to_str().unwrap(), cp).map_err(|e| anyhow!("VAD init failed: {e}"))?;
+    let mut vp = WhisperVadParams::new();
+    vp.set_threshold(0.5);
+    vp.set_min_speech_duration(150);
+    vp.set_min_silence_duration(200);
+    vp.set_speech_pad(80);
+    let segs = vctx.segments_from_samples(vp, audio).map_err(|e| anyhow!("VAD failed: {e}"))?;
+    let dur = audio.len() as f64 / SAMPLE_RATE as f64;
+    Ok(segs.map(|s| (s.start as f64 / 100.0, (s.end as f64 / 100.0).min(dur))).collect())
 }
 
 /// Merge neighbouring speech regions when the gap is short and the result stays below `max`.
