@@ -14,6 +14,16 @@ pub struct ModelInfo {
     /// Multilingual ggml model used to translate other languages to English
     /// (`None` = this model cannot translate, e.g. large-v3-turbo).
     pub multi: Option<String>,
+    /// Spoken languages this model is limited to (empty = any).
+    #[serde(default)]
+    pub languages: Vec<String>,
+}
+
+impl ModelInfo {
+    /// Can this model produce English subtitles for audio in `lang`?
+    pub fn supports(&self, lang: &str) -> bool {
+        (lang == "en" || self.multi.is_some()) && (self.languages.is_empty() || self.languages.iter().any(|l| l == lang))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

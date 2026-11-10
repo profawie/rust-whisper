@@ -157,9 +157,30 @@ const HALLUCINATIONS: &[&str] = &[
     "thank you very much for watching",
 ];
 
+/// Phrases Whisper invents from YouTube training data; never real film dialogue.
+const YOUTUBE_PHRASES: &[&str] = &[
+    "subscribe", "for watching", "for your viewing", "next video", "new video", "my channel", "this channel",
+    "like and share", "comment below", "see you in the next",
+];
+
+/// Chatbot-style replies that Kotoba Bilingual (trained on LLM translations) sometimes
+/// produces for unclear audio instead of a translation.
+const CHATBOT_PHRASES: &[&str] = &[
+    "provide more context", "more accurate translation", "not sure what you mean", "seems to be a typo",
+    "could you please clarify", "clarify the text", "as an ai", "i cannot translate", "unable to translate",
+    "the text you provided", "the sentence you provided", "dont know how to say it in english",
+    "how to translate this",
+];
+
 fn is_hallucination(seg: &Segment) -> bool {
     let n = norm_text(&seg.text);
     if n.contains("amaraorg") || n.starts_with("subtitles by") || n.starts_with("translated by") || n.starts_with("subtitled by") {
+        return true;
+    }
+    if YOUTUBE_PHRASES.iter().any(|p| n.contains(p)) && n.split(' ').count() <= 12 {
+        return true;
+    }
+    if CHATBOT_PHRASES.iter().any(|p| n.contains(p)) {
         return true;
     }
     seg.no_speech > 0.3 && HALLUCINATIONS.iter().any(|h| n == *h)
@@ -350,6 +371,17 @@ mod tests {
             seg(6.0, 8.0, "I don't know at all."),
         ]);
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn drops_chatbot_and_youtube_lines() {
+        let out = clean_segments(vec![
+            seg(0.0, 2.0, "Could you please provide more context or clarify the text so I can assist you?"),
+            seg(2.0, 4.0, "Thank you for watching! Please subscribe!"),
+            seg(4.0, 6.0, "The culprit is among us."),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "The culprit is among us.");
     }
 
     #[test]

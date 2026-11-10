@@ -17,6 +17,14 @@ pub const DEFAULT_CJK_MODEL: &str = "large-v2";
 const HF_WHISPER: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 const HF_VAD: &str = "https://huggingface.co/ggml-org/whisper-vad/resolve/main";
 pub const VAD_MODEL: &str = "ggml-silero-v5.1.2.bin";
+const HF_KOTOBA: &str = "https://huggingface.co/kotoba-tech/kotoba-whisper-bilingual-v1.0-ggml/resolve/main";
+/// Kotoba-Whisper Bilingual: distilled from large-v3 and trained on Japanese -> English
+/// speech translation. Note its convention: JA -> EN translation runs with language "en".
+pub const KOTOBA: &str = "kotoba-whisper-bilingual-v1.0";
+
+pub fn is_kotoba(arch: &str) -> bool {
+    arch.starts_with("kotoba")
+}
 
 fn m(id: &str, label: &str, size: &str, note: &str, en: &str, multi: Option<&str>) -> ModelInfo {
     ModelInfo {
@@ -26,6 +34,7 @@ fn m(id: &str, label: &str, size: &str, note: &str, en: &str, multi: Option<&str
         note: note.into(),
         en: en.into(),
         multi: multi.map(Into::into),
+        languages: Vec::new(),
     }
 }
 
@@ -39,6 +48,17 @@ pub fn catalogue() -> Vec<ModelInfo> {
         m("large-v2-q5", "Large v2 (q5)", "~1.1 GB", "near Large v2 quality, less RAM", "large-v2-q5_0", Some("large-v2-q5_0")),
         m("large-v3", "Large v3", "~3 GB", "most accurate transcription", "large-v3", Some("large-v3")),
         m("large-v3-turbo", "Large v3 Turbo", "~1.6 GB", "English audio only", "large-v3-turbo", None),
+        ModelInfo {
+            languages: vec!["ja".into()],
+            ..m(
+                "kotoba-bilingual",
+                "Kotoba Bilingual",
+                "~1.5 GB",
+                "Japanese only, trained for Japanese → English, fast",
+                KOTOBA,
+                Some(KOTOBA),
+            )
+        },
     ]
 }
 
@@ -77,7 +97,7 @@ pub fn load_prefs(path: &Path) -> BTreeMap<String, String> {
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .and_then(|v| serde_json::from_value(v.get("language_models")?.clone()).ok())
         .unwrap_or_default();
-    prefs.retain(|_, m| find(m).is_some());
+    prefs.retain(|lang, m| find(m).is_some_and(|m| m.supports(lang)));
     for l in languages() {
         prefs.entry(l.code.clone()).or_insert_with(|| default_for(&l.code).to_string());
     }
@@ -98,7 +118,8 @@ pub fn ggml_path(models_dir: &Path, arch: &str) -> PathBuf {
 pub fn ensure_model(models_dir: &Path, arch: &str, on_progress: impl FnMut(u64, u64)) -> Result<PathBuf> {
     let path = ggml_path(models_dir, arch);
     if !path.exists() {
-        download(&format!("{HF_WHISPER}/ggml-{arch}.bin"), &path, on_progress)?;
+        let repo = if is_kotoba(arch) { HF_KOTOBA } else { HF_WHISPER };
+        download(&format!("{repo}/ggml-{arch}.bin"), &path, on_progress)?;
     }
     Ok(path)
 }

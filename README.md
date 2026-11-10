@@ -31,9 +31,11 @@ Other settings: `PORT`, `HOST`, `THREADS`.
 
 ## Japanese / Chinese → English
 
-* **Model per spoken language.** The model you pick is remembered for each language (stored in `settings.json`), so English can stay on Small while Japanese and Chinese use **Large v2**, which translates CJK speech to English better than Large v3 (v3 tends to leave words untranslated). `Large v2 (q5)` is a lighter alternative.
-* **No duplicated lines.** Speech is found with Silero VAD and cut into pieces of at most ~24 s. Each piece is translated on its own, so a repetition loop cannot spread, and silence/music (where Whisper hallucinates) is never decoded. Repeated phrases, repeated lines (also A-B-A-B loops) and known hallucinations ("Thanks for watching", "Subtitles by…") are removed afterwards.
-* **Untranslated words.** A piece whose English still contains kana, kanji, hangul, etc. is translated again with an English prompt and with temperature sampling; the attempt with the fewest untranslated characters wins.
+* **Model per spoken language.** The model you pick is remembered for each language (stored in `settings.json`), so English can stay on Small while Japanese and Chinese use **Large v2** (the usual choice for translating to English). **Large v3** is worth comparing on the same film: with the clean-up below it did as well in tests. `Large v2 (q5)` is a lighter alternative.
+* **Kotoba Bilingual** (Japanese only): [kotoba-whisper-bilingual](https://huggingface.co/kotoba-tech/kotoba-whisper-bilingual-v1.0), distilled from Large v3 and trained specifically for Japanese → English speech translation. About 1.5 GB and much faster than Large v2.
+* **Film audio.** The track in the spoken language is picked when a file has several, and 5.1/7.1 tracks are folded to mono from the centre (dialogue) channel instead of mixing all music and effects channels in at the same level.
+* **No missing lines.** Silero VAD (tuned to keep speech under music) cuts the audio into pieces of at most ~15 s. A piece that comes back empty, much shorter than its speech, or still in Japanese/Chinese is translated again with an English prompt and with temperature sampling, and the best attempt wins. Whisper's own "no speech" skipping is relaxed because VAD already removed the silence.
+* **No duplicated lines.** Each piece is translated on its own, so a repetition loop cannot spread. Repeated phrases, repeated lines (also A-B-A-B loops) and YouTube-style hallucinations ("Thanks for watching", "Please subscribe", "Subtitles by…") are removed.
 * Long lines are split at sentence or comma boundaries into subtitle-sized lines.
 
 English audio keeps the simple path: one whisper.cpp pass with built-in VAD.

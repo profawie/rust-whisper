@@ -149,7 +149,7 @@ fn App() -> impl IntoView {
         cfg.with_untracked(|c| {
             let c = c.as_ref().unwrap();
             let pick = c.language_models.get(lang).cloned().unwrap_or_else(|| c.default_model.clone());
-            let ok = c.models.iter().any(|m| m.id == pick && (lang == "en" || m.multi.is_some()));
+            let ok = c.models.iter().any(|m| m.id == pick && m.supports(lang));
             if ok { pick } else { c.default_model.clone() }
         })
     };
@@ -374,7 +374,7 @@ fn App() -> impl IntoView {
             m.multi.clone().unwrap_or_default()
         );
         if cfg.with(|c| c.as_ref().map(|c| c.models.iter().any(|x| x.multi.is_none())).unwrap_or(false)) {
-            h.push_str(" (Turbo is English-only, so it is disabled.)");
+            h.push_str(" (Models that can't handle this language are greyed out.)");
         }
         if common::is_cjk_language(&lang) && !m.id.starts_with("large-v2") {
             h.push_str(" Tip: Large v2 gives the best Japanese/Chinese → English translations.");
@@ -472,8 +472,8 @@ fn App() -> impl IntoView {
                   {move || cfg.with(|c| c.as_ref().map(|c| c.models.clone()).unwrap_or_default()).into_iter().map(|m| {
                       let id = m.id.clone();
                       let selected = move || model.get() == id;
-                      let english_only = m.multi.is_none();
-                      let disabled = move || english_only && language.get() != "en";
+                      let m2 = m.clone();
+                      let disabled = move || !m2.supports(&language.get());
                       view! { <option value=m.id.clone() prop:selected=selected disabled=disabled>{format!("{} — {}, {}", m.label, m.size, m.note)}</option> }
                   }).collect_view()}
                 </select>

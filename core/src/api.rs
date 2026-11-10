@@ -102,8 +102,8 @@ async fn set_language_model(AxState(app): AxState<App>, Json(p): Json<LanguageMo
     if !models::languages().iter().any(|l| l.code == p.language) {
         return Err(err(StatusCode::BAD_REQUEST, format!("Unsupported language '{}'", p.language)));
     }
-    if p.language != "en" && m.multi.is_none() {
-        return Err(err(StatusCode::BAD_REQUEST, format!("{} is English-only.", m.label)));
+    if !m.supports(&p.language) {
+        return Err(err(StatusCode::BAD_REQUEST, format!("{} can't be used for '{}'.", m.label, p.language)));
     }
     let mut prefs = lock(&app.prefs);
     prefs.insert(p.language, p.model);
@@ -141,8 +141,8 @@ async fn transcribe(
     if !models::languages().iter().any(|l| l.code == language) {
         return Err(err(StatusCode::BAD_REQUEST, format!("Unsupported language '{language}'")));
     }
-    if language != "en" && m.multi.is_none() {
-        return Err(err(StatusCode::BAD_REQUEST, format!("{} is English-only; pick another model for '{language}'.", m.label)));
+    if !m.supports(&language) {
+        return Err(err(StatusCode::BAD_REQUEST, format!("{} can't be used for '{language}'; pick another model.", m.label)));
     }
 
     let raw_name = headers.get("x-filename").and_then(|v| v.to_str().ok()).unwrap_or("upload");

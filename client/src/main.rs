@@ -168,7 +168,7 @@ impl App {
     fn model_for(&self, language: &str) -> String {
         let Some(c) = self.config() else { return String::new() };
         let pick = c.language_models.get(language).cloned().unwrap_or_else(|| c.default_model.clone());
-        let ok = c.models.iter().any(|m| m.id == pick && (language == "en" || m.multi.is_some()));
+        let ok = c.models.iter().any(|m| m.id == pick && m.supports(language));
         if ok { pick } else { c.default_model.clone() }
     }
 
@@ -318,13 +318,12 @@ impl App {
 
                 ui.add_space(12.0);
                 ui.label("Model");
-                let english = self.settings.language == "en";
                 let mut model = self.model.clone();
                 let text = |m: &common::ModelInfo| format!("{} — {}, {}", m.label, m.size, m.note);
                 let current = cfg.models.iter().find(|m| m.id == model).map(text).unwrap_or_default();
                 egui::ComboBox::from_id_salt("model").width(330.0).selected_text(current).show_ui(ui, |ui| {
                     for m in &cfg.models {
-                        let enabled = english || m.multi.is_some();
+                        let enabled = m.supports(&self.settings.language);
                         ui.add_enabled_ui(enabled, |ui| {
                             ui.selectable_value(&mut model, m.id.clone(), text(m));
                         });

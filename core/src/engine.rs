@@ -10,7 +10,7 @@ use whisper_rs::{
     WhisperVadContextParams, WhisperVadParams,
 };
 
-use crate::audio::{load_audio, SAMPLE_RATE};
+use crate::audio::{load_audio_for, SAMPLE_RATE};
 use crate::cleanup::{clean_segments, foreign_count, split_long, to_srt, Segment};
 use crate::models;
 use crate::state::{human, lock, App};
@@ -32,7 +32,7 @@ fn threads() -> i32 {
 /// Longest piece of speech sent to Whisper in one go when translating.
 /// Each piece is decoded on its own, so a repetition loop can never spread
 /// past one piece (the main source of duplicated lines in long JP/ZH videos).
-const MAX_CHUNK_S: f32 = 24.0;
+const MAX_CHUNK_S: f32 = 15.0;
 /// Subtitle lines longer than this are split at sentence boundaries.
 const MAX_LINE_CHARS: usize = 84;
 
@@ -64,7 +64,9 @@ fn job(app: &App, path: &Path, filename: &str, model_key: &str, language: &str) 
     // ---- audio
     app.set_progress("Reading audio", 8.0);
     app.info("Extracting audio with ffmpeg...");
-    let audio = load_audio(path)?;
+    let decoded = load_audio_for(path, language)?;
+    app.info(format!("Using {}.", decoded.note));
+    let audio = decoded.samples;
     let secs = audio.len() / SAMPLE_RATE;
     app.info(format!("Audio length: {:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60));
 
@@ -72,7 +74,7 @@ fn job(app: &App, path: &Path, filename: &str, model_key: &str, language: &str) 
     let segments = if english {
         transcribe_english(app, &ctx, &audio, &vad_path)?
     } else {
-        translate(app, &ctx, &audio, &vad_path, language)?
+        translate(app, &ctx, &audio, &vad_path, language, &arch)?
     };
     app.info(format!("Speech processed in {:.0}s.", started.elapsed().as_secs_f64()));
 
@@ -212,7 +214,7 @@ fn transcribe_english(app: &App, ctx: &WhisperContext, audio: &[f32], vad: &Path
 ///    translated again with an English prompt and temperature sampling, and the
 ///    attempt with the fewest untranslated characters wins.
 /// 4. Repeated phrases/lines and known hallucinations are removed.
-fn translate(app: &App, ctx: &WhisperContext, audio: &[f32], vad: &Path, language: &str) -> Result<Vec<Segment>> {
+fn translate(app: &App, ctx: &WhisperContext, audio: &[f32], vad: &Path, language: &str, arch: &str) -> Result<Vec<Segment>> {
     app.set_progress("Detecting speech", 9.0);
     app.info("Detecting speech (VAD)...");
     let chunks = speech_chunks(audio, vad)?;
@@ -222,7 +224,13 @@ fn translate(app: &App, ctx: &WhisperContext, audio: &[f32], vad: &Path, languag
         return Ok(Vec::new());
     }
 
-    let lang = if language == "auto" { None } else { Some(language) };
+    let lang = if models::is_kotoba(arch) {
+        Some("en") // Kotoba Bilingual: Japanese speech -> English text is requested with language "en"
+    } else if language == "auto" {
+        None
+    } else {
+        Some(language)
+    };
     let label = "Translating to English";
     app.set_progress(label, 10.0);
     app.info(format!("{label}..."));
@@ -230,7 +238,7 @@ fn translate(app: &App, ctx: &WhisperContext, audio: &[f32], vad: &Path, languag
     let threads = threads();
     let mut all = Vec::new();
     let mut retried = 0;
-    let mut still_foreign = 0;
+    let mut still_bad = 0;
     let mut last_logged = -10.0;
     for (i, &(t0, t1)) in chunks.iter().enumerate() {
         let a = ((t0 * SAMPLE_RATE as f32) as usize).min(audio.len());
@@ -239,23 +247,24 @@ fn translate(app: &App, ctx: &WhisperContext, audio: &[f32], vad: &Path, languag
             continue;
         }
         let piece = &audio[a..b];
+        let speech_s = (t1 - t0).max(0.1);
         let mut best = run_piece(&mut state, threads, lang, piece, t0 as f64, Attempt::Normal)?;
-        let mut best_score = foreign_count(&joined(&best));
-        if best_score > 0 {
+        let mut best_score = score(&best, speech_s);
+        if best_score.needs_retry() {
             retried += 1;
             for attempt in [Attempt::Prompted, Attempt::Sampled] {
                 let cand = run_piece(&mut state, threads, lang, piece, t0 as f64, attempt)?;
-                let score = foreign_count(&joined(&cand));
-                if !cand.is_empty() && score < best_score {
+                let s = score(&cand, speech_s);
+                if s.better_than(&best_score) {
                     best = cand;
-                    best_score = score;
+                    best_score = s;
                 }
-                if best_score == 0 {
+                if !best_score.needs_retry() {
                     break;
                 }
             }
-            if best_score > 0 {
-                still_foreign += 1;
+            if best_score.needs_retry() {
+                still_bad += 1;
             }
         }
         all.extend(best);
@@ -269,12 +278,12 @@ fn translate(app: &App, ctx: &WhisperContext, audio: &[f32], vad: &Path, languag
     }
     if retried > 0 {
         app.info(format!(
-            "Re-translated {retried} pieces that still had untranslated words ({} fixed).",
-            retried - still_foreign
+            "Re-translated {retried} pieces that came back empty, too short or untranslated ({} fixed).",
+            retried - still_bad
         ));
     }
-    if still_foreign > 0 {
-        app.warn(format!("{still_foreign} pieces still contain some original-language words (often names)."));
+    if still_bad > 0 {
+        app.warn(format!("{still_bad} pieces may still miss words (often names, songs or shouting)."));
     }
     let before = all.len();
     let cleaned = clean_segments(all);
@@ -283,6 +292,38 @@ fn translate(app: &App, ctx: &WhisperContext, audio: &[f32], vad: &Path, languag
     }
     app.ok(format!("Got {} segments", cleaned.len()));
     Ok(split_long(cleaned, MAX_LINE_CHARS))
+}
+
+/// How good a translation of one piece looks.
+#[derive(Clone, Copy, Debug)]
+struct Score {
+    /// characters left in Japanese/Chinese/...
+    foreign: usize,
+    /// English words per second of detected speech
+    words_per_s: f32,
+}
+
+/// Speech that came out with fewer English words than this per second was
+/// most likely skipped by Whisper (it happens under music / with fast dialogue).
+const MIN_WORDS_PER_S: f32 = 0.6;
+
+impl Score {
+    fn needs_retry(&self) -> bool {
+        self.foreign > 0 || self.words_per_s < MIN_WORDS_PER_S
+    }
+    fn better_than(&self, other: &Score) -> bool {
+        if self.foreign != other.foreign {
+            return self.foreign < other.foreign;
+        }
+        self.words_per_s > other.words_per_s * 1.15
+    }
+}
+
+fn score(segs: &[Segment], speech_s: f32) -> Score {
+    // judge the text the way it will be kept: without loops and hallucinations
+    let kept = clean_segments(segs.to_vec());
+    let text = joined(&kept);
+    Score { foreign: foreign_count(&text), words_per_s: text.split_whitespace().count() as f32 / speech_s }
 }
 
 #[derive(Clone, Copy)]
@@ -321,6 +362,8 @@ fn run_piece(
     };
     p.set_language(lang);
     p.set_translate(true);
+    // VAD already removed the silence; don't let Whisper drop quiet or noisy speech as "no speech"
+    p.set_no_speech_thold(0.95);
     if !matches!(attempt, Attempt::Normal) {
         p.set_initial_prompt(ENGLISH_PROMPT);
     }
@@ -350,11 +393,12 @@ fn speech_chunks(audio: &[f32], vad: &Path) -> Result<Vec<(f32, f32)>> {
     cp.set_use_gpu(false);
     let mut vctx = WhisperVadContext::new(vad.to_str().unwrap(), cp).map_err(|e| anyhow!("VAD init failed: {e}"))?;
     let mut vp = WhisperVadParams::new();
-    vp.set_threshold(0.5);
-    vp.set_min_speech_duration(250);
-    vp.set_min_silence_duration(300);
+    // more sensitive than the default 0.5 so dialogue under film music is kept
+    vp.set_threshold(0.35);
+    vp.set_min_speech_duration(200);
+    vp.set_min_silence_duration(400);
     vp.set_max_speech_duration(MAX_CHUNK_S - 2.0);
-    vp.set_speech_pad(200);
+    vp.set_speech_pad(250);
     let segs = vctx.segments_from_samples(vp, audio).map_err(|e| anyhow!("VAD failed: {e}"))?;
     let dur = audio.len() as f32 / SAMPLE_RATE as f32;
     // whisper.cpp reports VAD timestamps in centiseconds
