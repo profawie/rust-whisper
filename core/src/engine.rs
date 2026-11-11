@@ -49,6 +49,7 @@ pub fn run_job(app: App, path: PathBuf, filename: String, model_key: String, lan
     if std::fs::remove_file(&path).is_ok() {
         app.info("Removed uploaded file.");
     }
+    crate::awake::KeepAwake::release_later(&app);
 }
 
 fn job(app: &App, path: &Path, filename: &str, model_key: &str, language: &str) -> Result<()> {

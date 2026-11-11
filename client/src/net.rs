@@ -14,6 +14,16 @@ fn agent(timeout: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5)).timeout_read(timeout).build()
 }
 
+/// How long the client keeps retrying while the server can't be reached
+/// (Mac asleep, Wi-Fi reconnecting, server restarting) before giving up.
+const RECONNECT_FOR: Duration = Duration::from_secs(20 * 60);
+
+fn is_transport(e: &anyhow::Error) -> bool {
+    e.to_string().starts_with(UNREACHABLE)
+}
+
+const UNREACHABLE: &str = "server not reachable";
+
 fn detail(e: ureq::Error) -> anyhow::Error {
     match e {
         ureq::Error::Status(code, resp) => {
@@ -24,7 +34,34 @@ fn detail(e: ureq::Error) -> anyhow::Error {
                 .unwrap_or(body);
             anyhow!("server said {code}: {msg}")
         }
-        other => anyhow!("{other}"),
+        ureq::Error::Transport(t) => {
+            // e.g. os error 10065 "unreachable host": the Mac went to sleep or Wi-Fi dropped
+            anyhow!("{UNREACHABLE} ({t}). Is the Mac awake and on the same network?")
+        }
+    }
+}
+
+/// Run `f`, retrying while the server is unreachable (up to RECONNECT_FOR).
+fn retrying<T>(tx: &Sender<JobEvent>, cancel: &Arc<AtomicBool>, pct: f32, mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    let started = std::time::Instant::now();
+    let mut tries = 0;
+    loop {
+        match f() {
+            Err(e) if is_transport(&e) && started.elapsed() < RECONNECT_FOR => {
+                tries += 1;
+                let _ = tx.send(JobEvent::Progress {
+                    stage: format!("Server not reachable, retrying ({tries})…"),
+                    pct,
+                });
+                for _ in 0..10 {
+                    if cancel.load(Ordering::Relaxed) {
+                        bail!("cancelled");
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+            other => return other,
+        }
     }
 }
 
@@ -95,7 +132,7 @@ pub fn process(
 ) -> Result<PathBuf> {
     // wait while the server is busy with someone else's file
     loop {
-        let s = state(base)?;
+        let s = retrying(tx, cancel, 0.0, || state(base))?;
         if s.status != "uploading" && s.status != "processing" {
             break;
         }
@@ -123,13 +160,15 @@ pub fn process(
         .send(reader)
         .map_err(detail)?;
 
-    // follow the job
+    // follow the job (a lost connection is retried: the server keeps working meanwhile)
+    let mut last_pct = 0.0;
     loop {
         if cancel.load(Ordering::Relaxed) {
             bail!("cancelled (the server finishes the current file on its own)");
         }
         std::thread::sleep(Duration::from_millis(1000));
-        let s = state(base)?;
+        let s = retrying(tx, cancel, last_pct, || state(base))?;
+        last_pct = s.progress as f32;
         match s.status.as_str() {
             "done" => break,
             "error" => bail!("{}", s.error),
@@ -141,9 +180,12 @@ pub fn process(
     }
 
     let _ = tx.send(JobEvent::Progress { stage: "Downloading subtitle".into(), pct: 100.0 });
-    let resp = agent(Duration::from_secs(60)).get(&format!("{base}/api/download")).call().map_err(detail)?;
-    let mut srt = Vec::new();
-    resp.into_reader().read_to_end(&mut srt)?;
+    let srt = retrying(tx, cancel, 100.0, || {
+        let resp = agent(Duration::from_secs(60)).get(&format!("{base}/api/download")).call().map_err(detail)?;
+        let mut srt = Vec::new();
+        resp.into_reader().read_to_end(&mut srt)?;
+        Ok(srt)
+    })?;
     let out = video.with_extension("srt");
     std::fs::write(&out, srt).with_context(|| format!("writing {}", out.display()))?;
     Ok(out)

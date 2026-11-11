@@ -36,6 +36,7 @@ pub struct Shared {
     pub output: Mutex<Option<PathBuf>>,
     pub prefs: Mutex<BTreeMap<String, String>>,
     pub model_cache: Mutex<ModelCache>,
+    pub awake: crate::awake::KeepAwake,
 }
 
 pub type App = Arc<Shared>;
@@ -53,6 +54,7 @@ impl Shared {
             output: Mutex::new(None),
             prefs: Mutex::new(prefs),
             model_cache: Mutex::new(ModelCache::default()),
+            awake: Default::default(),
         })
     }
 

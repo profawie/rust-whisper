@@ -76,6 +76,30 @@ struct Job {
     language: String,
 }
 
+/// One row of the progress list at the bottom.
+enum ItemState {
+    Queued,
+    Running { stage: String, pct: f32 },
+    Done { srt: PathBuf },
+    Failed(String),
+    Cancelled,
+}
+
+struct Item {
+    video: PathBuf,
+    model: String,
+    language: String,
+    state: ItemState,
+    started: Option<std::time::Instant>,
+    took: Option<Duration>,
+}
+
+impl Item {
+    fn finished(&self) -> bool {
+        matches!(self.state, ItemState::Done { .. } | ItemState::Failed(_) | ItemState::Cancelled)
+    }
+}
+
 enum Action {
     Play(PathBuf, Option<PathBuf>),
     Reveal(PathBuf),
@@ -99,12 +123,17 @@ struct App {
     cancel: Arc<AtomicBool>,
     vlc: Option<PathBuf>,
     message: Option<(String, bool)>,
-    done_count: usize,
+    items: Vec<Item>,
 }
 
 impl App {
     fn new(ctx: &egui::Context) -> Self {
-        let settings = Settings::load();
+        let mut settings = Settings::load();
+        // open on the folder the app was started from (where whisper-client.exe is, when
+        // double-clicked); Browse… still picks another one
+        if let Some(dir) = start_folder() {
+            settings.folder = Some(dir);
+        }
         let (job_tx, job_rx) = channel::<(String, Job)>();
         let (ev_tx, events) = channel::<JobEvent>();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -125,7 +154,7 @@ impl App {
             cancel,
             vlc,
             message: None,
-            done_count: 0,
+            items: Vec::new(),
         };
         app.rescan(ctx);
         if settings_path().exists() {
@@ -181,6 +210,15 @@ impl App {
         for v in videos {
             let queued = self.queue.iter().any(|j| j.video == v) || self.current.as_ref().is_some_and(|c| c.0 == v);
             if !queued {
+                self.items.retain(|it| !(it.video == v && it.finished()));
+                self.items.push(Item {
+                    video: v.clone(),
+                    model: self.model.clone(),
+                    language: self.settings.language.clone(),
+                    state: ItemState::Queued,
+                    started: None,
+                    took: None,
+                });
                 self.queue.push_back(Job { video: v, model: self.model.clone(), language: self.settings.language.clone() });
                 added += 1;
             }
@@ -198,6 +236,10 @@ impl App {
             self.cancel.store(false, Ordering::Relaxed);
             self.selected.remove(&job.video);
             self.current = Some((job.video.clone(), "Starting".into(), 0.0));
+            if let Some(it) = self.item_mut(&job.video) {
+                it.state = ItemState::Running { stage: "Starting".into(), pct: 0.0 };
+                it.started = Some(std::time::Instant::now());
+            }
             let _ = self.job_tx.send((self.base.clone(), job));
         }
     }
@@ -225,22 +267,39 @@ impl App {
                 self.scanning = None;
             }
         }
+        // developer aid for screenshots: queue every video once connected and scanned
+        static DEMO_DONE: AtomicBool = AtomicBool::new(false);
+        if std::env::var_os("WHISPER_CLIENT_DEMO").is_some() && self.config().is_some() && !DEMO_DONE.load(Ordering::Relaxed) {
+            if let Some(sc) = &self.scan {
+                DEMO_DONE.store(true, Ordering::Relaxed);
+                let mut v = Vec::new();
+                sc.without.all_videos(&mut v);
+                let list: Vec<PathBuf> = v.iter().map(|v| v.path.clone()).collect();
+                self.enqueue(list);
+            }
+        }
         while let Ok(ev) = self.events.try_recv() {
             match ev {
                 JobEvent::Started => {}
                 JobEvent::Progress { stage, pct } => {
                     if let Some(c) = &mut self.current {
-                        c.1 = stage;
+                        c.1 = stage.clone();
                         c.2 = pct;
+                        let video = c.0.clone();
+                        if let Some(it) = self.item_mut(&video) {
+                            it.state = ItemState::Running { stage, pct };
+                        }
                     }
                 }
                 JobEvent::Finished { video, srt } => {
-                    self.done_count += 1;
                     self.message = Some((
                         format!("Saved {}", srt.file_name().unwrap_or_default().to_string_lossy()),
                         false,
                     ));
-                    let _ = video;
+                    if let Some(it) = self.item_mut(&video) {
+                        it.took = it.started.map(|s| s.elapsed());
+                        it.state = ItemState::Done { srt };
+                    }
                     self.current = None;
                     self.rescan(ctx);
                     self.pump();
@@ -250,11 +309,29 @@ impl App {
                         format!("{}: {error}", video.file_name().unwrap_or_default().to_string_lossy()),
                         true,
                     ));
+                    if let Some(it) = self.item_mut(&video) {
+                        it.took = it.started.map(|s| s.elapsed());
+                        it.state = ItemState::Failed(error.clone());
+                    }
                     self.current = None;
                     if !self.cancel.load(Ordering::Relaxed) {
                         self.pump();
                     }
                 }
+            }
+        }
+    }
+
+    fn item_mut(&mut self, video: &Path) -> Option<&mut Item> {
+        self.items.iter_mut().rev().find(|it| it.video == video)
+    }
+
+    fn cancel_all(&mut self) {
+        self.queue.clear();
+        self.cancel.store(true, Ordering::Relaxed);
+        for it in self.items.iter_mut() {
+            if matches!(it.state, ItemState::Queued) {
+                it.state = ItemState::Cancelled;
             }
         }
     }
@@ -399,36 +476,129 @@ impl App {
     // ---------------------------------------------------------------- footer
     fn footer(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        if let Some((video, stage, pct)) = &self.current {
-            let name = video.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&name).strong());
-                ui.label(RichText::new(stage).color(Color32::GRAY));
-                if !self.queue.is_empty() {
-                    ui.label(format!("· {} more in queue", self.queue.len()));
+        let running = self.current.is_some();
+        let done = self.items.iter().filter(|i| matches!(i.state, ItemState::Done { .. })).count();
+        let failed = self.items.iter().filter(|i| matches!(i.state, ItemState::Failed(_))).count();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Progress").strong());
+            if self.items.is_empty() {
+                ui.label(RichText::new("nothing yet: tick videos on the left and press Generate subtitles").color(Color32::GRAY));
+            } else {
+                ui.label(
+                    RichText::new(format!("{} queued · {done} done · {failed} failed", self.queue.len()))
+                        .color(Color32::GRAY),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let finished = self.items.iter().any(Item::finished);
+                if ui.add_enabled(finished, egui::Button::new("Clear finished")).clicked() {
+                    self.items.retain(|i| !i.finished());
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Cancel").on_hover_text("Stop after the current step and clear the queue").clicked() {
-                        self.queue.clear();
-                        self.cancel.store(true, Ordering::Relaxed);
+                if ui
+                    .add_enabled(running || !self.queue.is_empty(), egui::Button::new("Cancel all"))
+                    .on_hover_text("Clear the queue and stop following the current file")
+                    .clicked()
+                {
+                    self.cancel_all();
+                }
+            });
+        });
+        ui.separator();
+        let mut actions: Vec<Action> = Vec::new();
+        egui::ScrollArea::vertical().id_salt("progress").auto_shrink([false, true]).max_height(ui.available_height() - 24.0).stick_to_bottom(true).show(ui, |ui| {
+            egui::Grid::new("progress_grid").num_columns(5).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+                for it in &self.items {
+                    let name = it.video.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    let (icon, color) = match &it.state {
+                        ItemState::Queued => ("⏳", Color32::GRAY),
+                        ItemState::Running { .. } => ("▶", Color32::from_rgb(99, 102, 241)),
+                        ItemState::Done { .. } => ("✔", Color32::from_rgb(16, 185, 129)),
+                        ItemState::Failed(_) => ("✖", Color32::from_rgb(239, 68, 68)),
+                        ItemState::Cancelled => ("■", Color32::GRAY),
+                    };
+                    ui.label(RichText::new(icon).color(color));
+                    let r = ui
+                        .allocate_ui_with_layout(egui::vec2(280.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.set_min_width(280.0);
+                            ui.add(egui::Label::new(&name).truncate().sense(egui::Sense::click()))
+                        })
+                        .inner;
+                    let r = r.on_hover_text(it.video.display().to_string());
+                    if r.double_clicked() {
+                        let srt = match &it.state {
+                            ItemState::Done { srt } => Some(srt.clone()),
+                            _ => None,
+                        };
+                        actions.push(Action::Play(it.video.clone(), srt));
                     }
-                });
-            });
-            ui.add(egui::ProgressBar::new(pct / 100.0).show_percentage());
-        } else {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Idle").color(Color32::GRAY));
-                if self.done_count > 0 {
-                    ui.label(format!("· {} subtitle(s) created this session", self.done_count));
+                    ui.label(RichText::new(format!("{} · {}", it.language, it.model)).small().color(Color32::GRAY));
+                    match &it.state {
+                        ItemState::Queued => {
+                            ui.label(RichText::new("waiting").color(Color32::GRAY));
+                        }
+                        ItemState::Running { stage, pct } => {
+                            let text = if stage.contains('%') { stage.clone() } else { format!("{stage} · {pct:.0}%") };
+                            ui.add(egui::ProgressBar::new(pct / 100.0).desired_width(300.0).text(text));
+                        }
+                        ItemState::Done { srt } => {
+                            ui.label(
+                                RichText::new(format!("saved {}", srt.file_name().unwrap_or_default().to_string_lossy()))
+                                    .color(Color32::from_rgb(16, 185, 129)),
+                            );
+                        }
+                        ItemState::Failed(e) => {
+                            ui.add(egui::Label::new(RichText::new(e).color(Color32::from_rgb(239, 68, 68))).truncate())
+                                .on_hover_text(e);
+                        }
+                        ItemState::Cancelled => {
+                            ui.label(RichText::new("cancelled").color(Color32::GRAY));
+                        }
+                    }
+                    let elapsed = it.took.or_else(|| match it.state {
+                        ItemState::Running { .. } => it.started.map(|s| s.elapsed()),
+                        _ => None,
+                    });
+                    ui.label(
+                        RichText::new(elapsed.map(|d| fmt_duration(d)).unwrap_or_default()).small().color(Color32::GRAY),
+                    );
+                    ui.end_row();
                 }
             });
+        });
+        for a in actions {
+            if let Action::Play(video, srt) = a {
+                if let Err(e) = player::play(self.vlc.as_deref(), &video, srt.as_deref()) {
+                    self.message = Some((format!("{e:#}"), true));
+                }
+            }
         }
         if let Some((msg, is_err)) = &self.message {
             let color = if *is_err { Color32::from_rgb(239, 68, 68) } else { Color32::from_rgb(16, 185, 129) };
-            ui.label(RichText::new(msg).color(color));
+            ui.add(egui::Label::new(RichText::new(msg).color(color)).truncate());
         }
         ui.add_space(4.0);
     }
+}
+
+fn fmt_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
+/// The folder the app was started in: the current directory, or the folder of
+/// the executable when the current directory is a system folder.
+fn start_folder() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok();
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+    let system = |p: &Path| {
+        let s = p.to_string_lossy().to_lowercase();
+        p.parent().is_none() || s.contains("\\windows\\system32") || s.ends_with("\\windows")
+    };
+    cwd.filter(|p| !system(p)).or(exe_dir)
 }
 
 // ------------------------------------------------------------------ trees
@@ -582,7 +752,7 @@ impl eframe::App for App {
         }
 
         egui::Panel::top("header").show(ui, |ui| self.header(ui));
-        egui::Panel::bottom("footer").show(ui, |ui| self.footer(ui));
+        egui::Panel::bottom("footer").resizable(true).default_size(190.0).min_size(110.0).show(ui, |ui| self.footer(ui));
 
         let mut actions = Vec::new();
         let half = ui.available_width() / 2.0;

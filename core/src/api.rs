@@ -173,6 +173,7 @@ async fn transcribe(
             ..Default::default()
         };
     }
+    app.awake.hold(); // no idle sleep while uploading / processing
     let _ = std::fs::create_dir_all(&app.paths.work);
     if let Ok(rd) = std::fs::read_dir(&app.paths.work) {
         for e in rd.flatten() {
@@ -186,6 +187,7 @@ async fn transcribe(
     app.info(format!("Receiving '{filename}' ({})", if declared > 0 { human(declared) } else { "unknown size".into() }));
 
     let abort = |msg: &str| {
+        crate::awake::KeepAwake::release_later(&app);
         let _ = std::fs::remove_file(&path);
         app.update(|s| *s = common::State { status: "idle".into(), ..Default::default() });
         app.warn(msg.to_string());

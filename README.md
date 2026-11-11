@@ -51,5 +51,8 @@ English audio keeps the simple path: one whisper.cpp pass with built-in VAD.
 * **Right panel:** videos that already have a subtitle (`name.srt`, `name.en.srt`, …), with their `.srt` files under them.
 * **Double-click** a video to play it in VLC; on the right, the video plays with its subtitle loaded, and double-clicking a specific `.srt` plays the video with that one. Right-click for more (show in Explorer, regenerate).
 * VLC is found automatically (Program Files or the registry); **Set VLC…** picks `vlc.exe` by hand.
+* The app opens on the folder it was started from (put `whisper-client.exe` in your video folder and double-click it); **Browse…** picks another.
+* **Progress list** at the bottom: every queued file with its state (waiting, uploading, translating with a progress bar, saved, failed with the reason) and how long it took. Double-click a row to play it.
+* If the server can't be reached for a while (Mac asleep, Wi-Fi reconnecting), the client keeps retrying for up to 20 minutes instead of failing. The server itself keeps the Mac from idle-sleeping while it uploads or processes a file (`caffeinate`), until 3 minutes after the job. Closing the lid still sleeps the Mac.
 
 The Mac running the server must accept connections on the port (allow it if macOS asks about incoming connections).

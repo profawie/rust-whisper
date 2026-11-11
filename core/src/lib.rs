@@ -1,5 +1,6 @@
 //! Shared engine + HTTP API used by both the server and the desktop app.
 pub mod api;
+pub mod awake;
 pub mod audio;
 pub mod cleanup;
 pub mod engine;
