@@ -80,6 +80,16 @@ pub fn state(base: &str) -> Result<State> {
     Ok(resp.into_json()?)
 }
 
+/// Can the server take a file of `size` bytes now? Err carries the server's reason.
+pub fn preflight(base: &str, size: u64) -> Result<()> {
+    match agent(Duration::from_secs(15)).get(&format!("{base}/api/preflight?size={size}")).call() {
+        Ok(_) => Ok(()),
+        // older servers without this endpoint
+        Err(ureq::Error::Status(404, _)) => Ok(()),
+        Err(e) => Err(detail(e)),
+    }
+}
+
 pub fn set_language_model(base: &str, language: &str, model: &str) -> Result<()> {
     agent(Duration::from_secs(10))
         .post(&format!("{base}/api/language-model"))
@@ -145,6 +155,8 @@ pub fn process(
 
     let file = File::open(video).with_context(|| format!("opening {}", video.display()))?;
     let total = file.metadata()?.len();
+    // ask first: a refused upload would otherwise look like a dropped connection
+    retrying(tx, cancel, 0.0, || preflight(base, total))?;
     let name = video.file_name().and_then(|n| n.to_str()).unwrap_or("video");
     let encoded = percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC).to_string();
     let reader = CountingReader { inner: file, sent: 0, total, next: 0, tx: tx.clone(), cancel: cancel.clone() };
@@ -153,12 +165,25 @@ pub fn process(
         percent_encoding::utf8_percent_encode(model, percent_encoding::NON_ALPHANUMERIC),
         percent_encoding::utf8_percent_encode(language, percent_encoding::NON_ALPHANUMERIC)
     );
-    agent(Duration::from_secs(3600))
+    let sent = agent(Duration::from_secs(3600))
         .post(&url)
         .set("X-Filename", &encoded)
         .set("Content-Length", &total.to_string())
         .send(reader)
-        .map_err(detail)?;
+        .map_err(detail);
+    if let Err(e) = sent {
+        // the server closes the connection when it refuses an upload half-way
+        // (e.g. its disk filled up): ask it why instead of reporting "not reachable"
+        if is_transport(&e) {
+            std::thread::sleep(Duration::from_millis(500));
+            if let Err(reason) = preflight(base, total) {
+                if !is_transport(&reason) {
+                    return Err(reason);
+                }
+            }
+        }
+        return Err(e);
+    }
 
     // follow the job (a lost connection is retried: the server keeps working meanwhile)
     let mut last_pct = 0.0;

@@ -35,6 +35,7 @@ pub fn router(app: App) -> Router {
         .route("/api/ip", get(ip))
         .route("/api/config", get(config))
         .route("/api/state", get(state))
+        .route("/api/preflight", get(preflight))
         .route("/api/language-model", post(set_language_model))
         .route("/api/transcribe", post(transcribe).layer(DefaultBodyLimit::disable()))
         .route("/api/download", get(download))
@@ -49,6 +50,13 @@ pub fn startup(app: &App) {
     let _ = std::fs::remove_dir_all(&app.paths.work);
     let _ = std::fs::create_dir_all(&app.paths.work);
     let _ = std::fs::create_dir_all(&app.paths.models);
+    if let Some(free) = free_space(&app.paths.work) {
+        if free < 5 * 1024 * 1024 * 1024 {
+            let msg = format!("Low disk space on this Mac: only {} free. Uploads need the file size plus 1 GB.", human(free));
+            eprintln!("  WARNING: {msg}");
+            app.warn(msg);
+        }
+    }
 }
 
 // ------------------------------------------------------------- static
@@ -128,6 +136,50 @@ fn free_space(path: &std::path::Path) -> Option<u64> {
     line.split_whitespace().nth(3)?.parse::<u64>().ok().map(|k| k * 1024)
 }
 
+/// Free space the Mac must keep beyond the upload itself: macOS needs room for swap
+/// while a large model runs, and a full disk makes the upload fail half-way.
+const DISK_RESERVE: u64 = 1024 * 1024 * 1024;
+
+/// Why a file of `size` bytes can't be accepted right now, if it can't.
+fn upload_blocker(app: &App, size: u64) -> Option<ApiError> {
+    if size > MAX_BYTES {
+        return Some(err(StatusCode::PAYLOAD_TOO_LARGE, format!("File is {}; the limit is {}.", human(size), human(MAX_BYTES))));
+    }
+    let status = app.snapshot().status;
+    if status == "uploading" || status == "processing" {
+        return Some(err(StatusCode::CONFLICT, "Another file is already being uploaded or processed."));
+    }
+    if size > 0 {
+        if let Some(free) = free_space(&app.paths.work) {
+            if size + DISK_RESERVE > free {
+                return Some(err(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    format!(
+                        "The server's disk is full: {} free, this file needs {} plus 1 GB to spare. Free up space on the Mac and try again.",
+                        human(free),
+                        human(size)
+                    ),
+                ));
+            }
+        }
+    }
+    None
+}
+
+#[derive(Deserialize)]
+struct PreflightQuery {
+    size: Option<u64>,
+}
+
+/// Lets a client check before sending a large file (a refused upload otherwise
+/// shows up on the client as a reset connection, not as the real reason).
+async fn preflight(AxState(app): AxState<App>, Query(q): Query<PreflightQuery>) -> Result<Json<serde_json::Value>, ApiError> {
+    match upload_blocker(&app, q.size.unwrap_or(0)) {
+        Some(e) => Err(e),
+        None => Ok(Json(serde_json::json!({ "ok": true, "free": free_space(&app.paths.work) }))),
+    }
+}
+
 /// Raw-body upload (not multipart) so a 10 GB file is streamed straight to disk.
 async fn transcribe(
     AxState(app): AxState<App>,
@@ -195,11 +247,11 @@ async fn transcribe(
 
     if declared > 0 {
         if let Some(free) = free_space(&app.paths.work) {
-            if declared as f64 * 1.02 > free as f64 {
-                abort("Not enough disk space.");
+            if declared + DISK_RESERVE > free {
+                abort(&format!("Not enough disk space ({} free, need {} + 1 GB).", human(free), human(declared)));
                 return Err(err(
                     StatusCode::INSUFFICIENT_STORAGE,
-                    format!("Not enough free disk space ({} free, need {}).", human(free), human(declared)),
+                    format!("The server's disk is full: {} free, this file needs {} plus 1 GB to spare.", human(free), human(declared)),
                 ));
             }
         }
@@ -229,8 +281,13 @@ async fn transcribe(
             return Err(err(StatusCode::PAYLOAD_TOO_LARGE, format!("File exceeds the {} limit.", human(MAX_BYTES))));
         }
         if let Err(e) = file.write_all(&chunk).await {
-            abort("Upload failed.");
-            return Err(err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+            let msg = if e.kind() == std::io::ErrorKind::StorageFull {
+                "Upload failed: the server's disk is full. Free up space on the Mac.".to_string()
+            } else {
+                format!("Upload failed: {e}")
+            };
+            abort(&msg);
+            return Err(err(StatusCode::INSUFFICIENT_STORAGE, msg));
         }
         if declared > 0 {
             let pct = total * 100 / declared;
